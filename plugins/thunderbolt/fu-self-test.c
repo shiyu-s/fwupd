@@ -23,7 +23,7 @@
 #include <locale.h>
 
 #include "fu-plugin-private.h"
-#include "fu-thunderbolt-image.h"
+#include "fu-thunderbolt-firmware.h"
 
 static gchar *
 udev_mock_add_domain (UMockdevTestbed *bed, int id)
@@ -994,10 +994,72 @@ test_tree (ThunderboltTest *tt, gconstpointer user_data)
 	g_assert_true (ret);
 }
 
+static gboolean
+_compare_images (FuThunderboltFirmware *firmware, FuThunderboltFirmware *firmware_old, GError **error)
+{
+	if (fu_thunderbolt_firmware_is_host (firmware) !=
+	    fu_thunderbolt_firmware_is_host (firmware_old)) {
+		g_set_error (error,
+			     FWUPD_ERROR,
+			     FWUPD_ERROR_INVALID_FILE,
+			     "incorrect firmware mode, got %s, expected %s",
+			     fu_thunderbolt_firmware_is_host (firmware) ? "host" : "device",
+			     fu_thunderbolt_firmware_is_host (firmware_old) ? "host" : "device");
+		return FALSE;
+	}
+	if (fu_thunderbolt_firmware_get_vendor_id (firmware) !=
+	    fu_thunderbolt_firmware_get_vendor_id (firmware_old)) {
+		g_set_error (error,
+			     FWUPD_ERROR,
+			     FWUPD_ERROR_INVALID_FILE,
+			     "incorrect device vendor, got 0x%04x, expected 0x%04x",
+			     fu_thunderbolt_firmware_get_vendor_id (firmware),
+			     fu_thunderbolt_firmware_get_vendor_id (firmware_old));
+		return FALSE;
+	}
+	if (fu_thunderbolt_firmware_get_device_id (firmware) !=
+	    fu_thunderbolt_firmware_get_device_id (firmware_old)) {
+		g_set_error (error,
+			     FWUPD_ERROR,
+			     FWUPD_ERROR_INVALID_FILE,
+			     "incorrect device type, got 0x%04x, expected 0x%04x",
+			     fu_thunderbolt_firmware_get_device_id (firmware),
+			     fu_thunderbolt_firmware_get_device_id (firmware_old));
+		return FALSE;
+	}
+	if (fu_thunderbolt_firmware_get_model_id (firmware) !=
+		fu_thunderbolt_firmware_get_model_id (firmware_old)) {
+		g_set_error (error,
+				FWUPD_ERROR,
+				FWUPD_ERROR_INVALID_FILE,
+				"incorrect device model, got 0x%04x, expected 0x%04x",
+				fu_thunderbolt_firmware_get_model_id (firmware),
+				fu_thunderbolt_firmware_get_model_id (firmware_old));
+		return FALSE;
+	}
+	if (fu_thunderbolt_firmware_get_has_pd (firmware) !=
+		fu_thunderbolt_firmware_get_has_pd (firmware_old)) {
+		g_set_error_literal (error,
+				     FWUPD_ERROR,
+				     FWUPD_ERROR_INVALID_FILE,
+				     "incorrect PD section");
+		return FALSE;
+	}
+	if (fu_thunderbolt_firmware_get_flash_size (firmware) !=
+		fu_thunderbolt_firmware_get_flash_size (firmware_old)) {
+		g_set_error_literal (error,
+				     FWUPD_ERROR,
+				     FWUPD_ERROR_INVALID_FILE,
+				     "incorrect flash size");
+		return FALSE;
+	}
+	return TRUE;
+}
+
 static void
 test_image_validation (ThunderboltTest *tt, gconstpointer user_data)
 {
-	FuPluginValidation val;
+	gboolean ret;
 	g_autofree gchar *ctl_path = NULL;
 	g_autofree gchar *fwi_path = NULL;
 	g_autofree gchar *bad_path = NULL;
@@ -1008,6 +1070,9 @@ test_image_validation (ThunderboltTest *tt, gconstpointer user_data)
 	g_autoptr(GBytes)      ctl_data = NULL;
 	g_autoptr(GBytes)      bad_data = NULL;
 	g_autoptr(GError)      error = NULL;
+	g_autoptr(FuThunderboltFirmware) firmware_fwi = fu_thunderbolt_firmware_new ();
+	g_autoptr(FuThunderboltFirmware) firmware_ctl = fu_thunderbolt_firmware_new ();
+	g_autoptr(FuThunderboltFirmware) firmware_bad = fu_thunderbolt_firmware_new ();
 
 	/* image as if read from the controller (i.e. no headers) */
 	ctl_path = g_build_filename (TESTDATADIR,
@@ -1019,6 +1084,12 @@ test_image_validation (ThunderboltTest *tt, gconstpointer user_data)
 	ctl_data = g_mapped_file_get_bytes (ctl_file);
 	g_assert_nonnull (ctl_data);
 
+	/* parse */
+	ret = fu_firmware_parse (FU_FIRMWARE (firmware_ctl), ctl_data, FWUPD_INSTALL_FLAG_NONE, &error);
+	g_debug ("%s", error->message);
+	g_assert_true (ret);
+	g_assert_no_error (error);
+
 	/* valid firmware update image */
 	fwi_path = g_build_filename (TESTDATADIR, "thunderbolt/minimal-fw.bin", NULL);
 	fwi_file = g_mapped_file_new (fwi_path, FALSE, &error);
@@ -1027,6 +1098,11 @@ test_image_validation (ThunderboltTest *tt, gconstpointer user_data)
 
 	fwi_data = g_mapped_file_get_bytes (fwi_file);
 	g_assert_nonnull (fwi_data);
+
+	/* parse */
+	ret = fu_firmware_parse (FU_FIRMWARE (firmware_fwi), fwi_data, FWUPD_INSTALL_FLAG_NONE, &error);
+	g_assert_true (ret);
+	g_assert_no_error (error);
 
 	/* a wrong/bad firmware update image */
 	bad_path = g_build_filename (TESTDATADIR, "colorhug/firmware.bin", NULL);
@@ -1037,43 +1113,47 @@ test_image_validation (ThunderboltTest *tt, gconstpointer user_data)
 	bad_data = g_mapped_file_get_bytes (bad_file);
 	g_assert_nonnull (bad_data);
 
-	/* now for some testing ... this should work */
-	val = fu_thunderbolt_image_validate (ctl_data, fwi_data, &error);
+	/* parse */
+	ret = fu_firmware_parse (FU_FIRMWARE (firmware_bad), bad_data, FWUPD_INSTALL_FLAG_NONE, &error);
+	g_assert_true (ret);
 	g_assert_no_error (error);
-	g_assert_cmpint (val, ==, VALIDATION_PASSED);
 
+	/* now for some testing ... this should work */
+	ret = _compare_images (firmware_ctl, firmware_fwi, &error);
+	g_assert_true (ret);
+	g_assert_no_error (error);
 
 	/* these all should fail */
 	/*  valid controller, bad update data */
-	val = fu_thunderbolt_image_validate (ctl_data, ctl_data, &error);
+	ret = _compare_images (firmware_ctl, firmware_ctl, &error);
+	g_assert_false (ret);
 	g_assert_error (error, FWUPD_ERROR, FWUPD_ERROR_READ);
-	g_assert_cmpint (val, ==, VALIDATION_FAILED);
 	g_debug ("expected image validation error [ctl, ctl]: %s", error->message);
 	g_clear_error (&error);
 
-	val = fu_thunderbolt_image_validate (ctl_data, bad_data, &error);
+	ret = _compare_images (firmware_ctl, firmware_bad, &error);
+	g_assert_false (ret);
 	g_assert_error (error, FWUPD_ERROR, FWUPD_ERROR_READ);
-	g_assert_cmpint (val, ==, VALIDATION_FAILED);
 	g_debug ("expected image validation error [ctl, bad]: %s", error->message);
 	g_clear_error (&error);
 
 	/* bad controller data, valid update data */
-	val = fu_thunderbolt_image_validate (fwi_data, fwi_data, &error);
+	ret = _compare_images (firmware_fwi, firmware_fwi, &error);
+	g_assert_false (ret);
 	g_assert_error (error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE);
-	g_assert_cmpint (val, ==, VALIDATION_FAILED);
 	g_debug ("expected image validation error [fwi, fwi]: %s", error->message);
 	g_clear_error (&error);
 
-	val = fu_thunderbolt_image_validate (bad_data, fwi_data, &error);
+	ret = _compare_images (firmware_bad, firmware_fwi, &error);
+	g_assert_false (ret);
 	g_assert_error (error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE);
-	g_assert_cmpint (val, ==, VALIDATION_FAILED);
 	g_debug ("expected image validation error [bad, fwi]: %s", error->message);
 	g_clear_error (&error);
 
 	/* both bad */
-	val = fu_thunderbolt_image_validate (bad_data, bad_data, &error);
+	ret = _compare_images (firmware_bad, firmware_bad, &error);
+	g_assert_false (ret);
 	g_assert_error (error, FWUPD_ERROR, FWUPD_ERROR_READ);
-	g_assert_cmpint (val, ==, VALIDATION_FAILED);
 	g_debug ("expected image validation error [bad, bad]: %s", error->message);
 	g_clear_error (&error);
 }

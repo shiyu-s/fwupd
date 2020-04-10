@@ -1,5 +1,5 @@
 cargs = ['-DG_LOG_DOMAIN="FuPluginThunderbolt"']
-
+cargs += '-DTESTDATADIR="' + join_paths(meson.source_root(), 'data', 'tests') + '"'
 install_data([
   'thunderbolt.quirk',
   ],
